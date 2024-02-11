@@ -1,4 +1,7 @@
-﻿using System.Net.Http.Json;
+﻿using System.Diagnostics;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Cocona;
 using Humanizer;
 using Humanizer.Localisation;
@@ -42,6 +45,7 @@ app.AddCommand("info", async (string? user,
 
     //todo: duration in rot bei über 8h,warnung bei über 8h :p
     //todo: punchout notifcation count. un bestätige notificatuions.
+    //todo: notify send notify linux when alert
     AnsiConsole.WriteLine($"\u23f3 Duration: {activeDuration.Humanize(3, minUnit: TimeUnit.Second)}");
     return;
   }
@@ -61,6 +65,7 @@ app.AddCommand("punch-in", async (string? user,
   ArgumentException.ThrowIfNullOrWhiteSpace(user);
 
   var userData = await api.GetUserData(user);
+  var punchInTime = userData.LastChange;
 
   if (userData!.IsPunchedIn)
   {
@@ -71,6 +76,7 @@ app.AddCommand("punch-in", async (string? user,
   else
   {
     await api.PunchIn(userData.Id, userData.TeamId);
+    punchInTime = DateTime.Now;
 
     AnsiConsole.WriteLine($"🚀 User \"{userData.DisplayName}\" is now punched in.");
     AnsiConsole.WriteLine($"\u23f0 Started: {DateTime.Now:HH:mm:ss [dd.MM.yyyy]}");
@@ -94,10 +100,10 @@ app.AddCommand("punch-in", async (string? user,
         {
           await api.PunchOut(userData.Id, userData.TeamId);
 
-          var activeDuration = DateTime.Now - userData.LastChange;
+          var activeDuration = DateTime.Now - punchInTime;
 
-          AnsiConsole.WriteLine(
-            $"\ud83d\udca6 Shift ended after: {activeDuration.Humanize(3, minUnit: TimeUnit.Second)}");
+          AnsiConsole.WriteLine($"\ud83d\udca6 Shift ended after: " +
+                                $"{activeDuration.Humanize(3, minUnit: TimeUnit.Second)}");
           AnsiConsole.WriteLine($"\ud83d\udecc User \"{userData.DisplayName}\" is now punched out.");
 
           break;
@@ -109,11 +115,30 @@ app.AddCommand("punch-in", async (string? user,
       }
     });
 });
-//
-// app.AddCommand("punch-out", () =>
-// {
-//
-// });
+
+app.AddCommand("punch-out", async (string? user, Signl4Api api,
+  AppConfig appConfig) =>
+{
+  user ??= appConfig.User;
+
+  ArgumentException.ThrowIfNullOrWhiteSpace(user);
+
+  var userData = await api.GetUserData(user);
+
+  if (userData.IsPunchedIn)
+  {
+    await api.PunchOut(userData.Id, userData.TeamId);
+
+    AnsiConsole.WriteLine($"\ud83d\udecc User \"{userData.DisplayName}\" is now punched out.");
+    var activeDuration = DateTime.Now - userData.LastChange;
+
+    AnsiConsole.WriteLine($"\ud83d\udca6 Shift ended after: " +
+                          $"{activeDuration.Humanize(3, minUnit: TimeUnit.Second)}");
+    return;
+  }
+
+  AnsiConsole.WriteLine($"\ud83d\udecc User \"{userData.DisplayName}\" is not punched in.");
+});
 
 app.Run();
 
@@ -178,6 +203,7 @@ class Signl4Api
   {
     var punchInOutData = new PunchInOutData(userId, [teamId]);
 
-    await _httpClient.PostAsJsonAsync($"{baseUrl}/duties/punchOut", punchInOutData);
+    var result = await _httpClient
+      .PostAsJsonAsync($"{baseUrl}/duties/punchOut", punchInOutData);
   }
 }
