@@ -1,12 +1,12 @@
 ﻿using System.Diagnostics;
-using System.Net.Http.Json;
-using System.Text.Json;
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Cocona;
 using Humanizer;
 using Humanizer.Localisation;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using PunchChamp;
 using Spectre.Console;
 
 var homeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -14,10 +14,18 @@ var configPath = Path.Combine(homeDirectory, ".config", "punchchamp");
 var configFile = Path.Combine(configPath, "punchchamp.json");
 Directory.CreateDirectory(configPath);
 
+// CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+//
+// Console.WriteLine(DateTime.Parse("13.02.2024 11:11:11"));
+//
+// return;
+// //Console.WriteLine(DateTime.Parse("13.02.2024 11:11:11"));
+
 var builder = CoconaApp.CreateBuilder();
 
+//todo: rename environment user
 builder.Configuration
-  .AddJsonFile(configFile, false)
+  .AddJsonFile(configFile, true)
   .AddEnvironmentVariables("PunchChamp_");
 
 builder.Services.AddSingleton(builder.Configuration.Get<AppConfig>());
@@ -25,6 +33,64 @@ builder.Services.AddSingleton(builder.Configuration.Get<AppConfig>());
 builder.Services.AddTransient<Signl4Api>();
 
 var app = builder.Build();
+
+app.AddCommand("watch", async (string? user,
+  Signl4Api api,
+  AppConfig config,
+  CoconaAppContext ctx) =>
+{
+  user ??= config.User;
+
+  ArgumentException.ThrowIfNullOrWhiteSpace(user);
+
+  var userData = await api.GetUserData(user);
+
+  var alert = await api.GetLatestAlert(userData.Id, userData.TeamId);
+
+  await AnsiConsole.Progress()
+    .AutoClear(true)
+    .Columns(new SpinnerColumn(Spinner.Known.Dots12), new TaskDescriptionColumn())
+    .StartAsync(async progress =>
+    {
+      progress.AddTask("Waiting for alerts...");
+
+      while (!ctx.CancellationToken.IsCancellationRequested)
+      {
+        var latestAlert = await api.GetLatestAlert(userData.Id, userData.TeamId);
+
+        if (latestAlert != null && alert?.Id != latestAlert.Id)
+        {
+          var table = new Table();
+
+          table.AddColumn($"\ud83d\udea8 {latestAlert.Title}");
+          table.AddRow(latestAlert.Text);
+
+          AnsiConsole.Write(table);
+
+          var url = $"https://account.signl4.com/manage/Signls?alertId={latestAlert.Id}";
+
+          //File.Exists("/usr/bin/notify-send");
+
+          if (config.Notify)
+          {
+            try
+            {
+              Process.Start("notify-send",
+                $"\"\ud83d\udea8 {latestAlert.Title}\" \"{latestAlert.Text}\n<a href='{url}'>link</a>\"");
+            }
+            catch (Exception _)
+            {
+              // ignored
+            }
+          }
+        }
+
+        alert = latestAlert;
+
+        await Task.Delay(5000, ctx.CancellationToken).ContinueWith(_ => { });
+      }
+    });
+});
 
 app.AddCommand("info", async (string? user,
   Signl4Api api,
@@ -43,6 +109,7 @@ app.AddCommand("info", async (string? user,
 
     var activeDuration = DateTime.Now - userData.LastChange;
 
+    //todo: retry api connection
     //todo: duration in rot bei über 8h,warnung bei über 8h :p
     //todo: punchout notifcation count. un bestätige notificatuions.
     //todo: notify send notify linux when alert
@@ -163,47 +230,13 @@ enum DutyMode
 
 record AppConfig
 {
+  public bool Notify { get; set; } = true;
   public string? User { get; set; }
   public string? Key { get; set; }
 }
 
-class Signl4Api
-{
-  private readonly HttpClient _httpClient;
-  private readonly string baseUrl = "https://connect.signl4.com/api/v2";
+record AlertDataArray(AlertData[] Results);
 
-  public Signl4Api(AppConfig appConfig)
-  {
-    var httpClient = new HttpClient();
-    httpClient.DefaultRequestHeaders.Add("x-s4-api-key", appConfig.Key);
-    _httpClient = httpClient;
-  }
+record AlertData(string Id, string Title, string Text, uint Severity);
 
-  public async Task<UserData> GetUserData(string user)
-  {
-    try
-    {
-      var userData = await _httpClient.GetFromJsonAsync<UserData>($"{baseUrl}/users/{user}");
-      return userData ?? throw new InvalidOperationException();
-    }
-    catch (Exception _)
-    {
-      throw new Exception($"User: {user} not found.");
-    }
-  }
-
-  public async Task PunchIn(string userId, string teamId)
-  {
-    var punchInOutData = new PunchInOutData(userId, [teamId]);
-
-    await _httpClient.PostAsJsonAsync($"{baseUrl}/duties/punchIn", punchInOutData);
-  }
-
-  public async Task PunchOut(string userId, string teamId)
-  {
-    var punchInOutData = new PunchInOutData(userId, [teamId]);
-
-    var result = await _httpClient
-      .PostAsJsonAsync($"{baseUrl}/duties/punchOut", punchInOutData);
-  }
-}
+record AlertFilter(string[] TeamIds, string TextToSearch);
